@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# AV-HuBERT (cloned + large checkpoint – users run setup steps instead)
+av_hubert/
+
+# Large media and downloads
+*.mp4
+*.avi
+*.npz
+test_videos/
+test_sample.mp4
+self_large_vox_433h.pt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Logs and temp
+*.log
+.cache/
