@@ -1,64 +1,117 @@
-# AVH-Align
+# AVH-Align — Deepfake Detection (How I Set It Up & Run It)
 
 [![arXiv](https://img.shields.io/badge/-arXiv-B31B1B.svg?style=for-the-badge)](https://arxiv.org/abs/2412.00175)
 
-**Official PyTorch Implementation:**
+**Official PyTorch implementation of the paper:**
 
 > **Ștefan Smeu, Dragoș-Alexandru Boldisor, Dan Oneață and Elisabeta Oneață**  
 > [Circumventing shortcuts in audio-visual deepfake detection datasets with unsupervised learning](https://arxiv.org/abs/2412.00175)  
 > *CVPR, 2025*
 
-Audio-visual deepfake detection: the model scores how well mouth movements and speech are synchronized. **Higher score = more likely deepfake.**
+I got this running on **macOS (M3)** with CPU. It detects deepfakes by checking if mouth movements and speech are in sync. **Higher score = more likely fake; lower score = more likely real.**
 
 ---
 
-## Step-by-step: How to run (single video)
+## What I Did — Overview
 
-Follow these steps in order. Works on **macOS (M1/M2/M3)** with CPU or **Linux/Windows** with CUDA.
+1. Cloned the repo and set up a Python 3.10 environment (conda).
+2. Installed PyTorch and all dependencies.
+3. Cloned AV-HuBERT, installed fairseq, and fixed a few dependency/loading issues.
+4. Downloaded the face landmark model, mean face, and the big AV-HuBERT checkpoint (~1 GB).
+5. Installed ffmpeg and ran the single-video test script.
+
+Below are the **exact steps I followed**, with details so you can run the test and everything else the same way.
+
+---
+
+## Detailed Step-by-Step Setup
 
 ### Step 1: Clone this repo
 
 ```bash
-git clone https://github.com/bit-ml/AVH-Align.git
-cd AVH-Align
+git clone https://github.com/SOHAM240104/AVH.git
+cd AVH
 ```
+
+You should see folders like `checkpoints/`, `av1m_metadata/`, and files like `test_video.py`, `model.py`, `eval.py`, etc.
+
+---
 
 ### Step 2: Create a Python 3.10 environment
 
-We use Python 3.10 for compatibility with fairseq (used by AV-HuBERT).
+The AV-HuBERT part uses **fairseq**, which needs Python 3.10. I used conda.
 
 ```bash
-# With conda (recommended)
 conda create -n avh python=3.10 -y
 conda activate avh
 ```
 
-If you don’t use conda, create a venv with Python 3.10 and activate it.
+Check the version:
 
-### Step 3: Install PyTorch and dependencies
+```bash
+python --version
+# Should show: Python 3.10.x
+```
+
+If you don’t have conda, use a virtualenv with Python 3.10 and activate it before the next steps.
+
+---
+
+### Step 3: Install PyTorch and all dependencies
+
+Run these in order. I did this from the **AVH** repo root with `conda activate avh` already active.
+
+**3a. PyTorch (CPU is enough for testing; use CUDA on Linux if you have a GPU):**
 
 ```bash
 pip install torch torchvision torchaudio
+```
+
+**3b. Other Python packages used by the project:**
+
+```bash
 pip install scikit-learn pandas tqdm
 pip install opencv-python dlib librosa python_speech_features scikit-video
 pip install scikit-image sentencepiece
 ```
 
+- `opencv-python`, `dlib` — face detection and mouth cropping  
+- `librosa`, `python_speech_features` — audio loading and features  
+- `scikit-video` — reading video frames  
+- `sentencepiece` — needed when loading the AV-HuBERT checkpoint  
+
+If something fails (e.g. `dlib` on Windows), install build tools or use pre-built wheels as per the package docs.
+
+---
+
 ### Step 4: Clone AV-HuBERT and install fairseq
 
-AV-HuBERT is the backbone that extracts audio and visual features. Run from the **AVH-Align** repo root:
+AV-HuBERT is the model that turns video + audio into feature vectors. We need it inside our repo.
+
+**4a. Clone AV-HuBERT (from repo root):**
 
 ```bash
+# You should be in the AVH folder
 git clone https://github.com/facebookresearch/av_hubert.git
 cd av_hubert/avhubert
+```
+
+**4b. Init submodules (this pulls in fairseq):**
+
+```bash
 git submodule init
 git submodule update
+```
+
+**4c. Install fairseq in editable mode:**
+
+```bash
 cd ../fairseq
 pip install --editable ./
 cd ../avhubert
 ```
 
-Fix dependency versions (needed for this fairseq version):
+**4d. Fix dependency versions (I had to do this or imports/checkpoint loading failed):**
 
 ```bash
 pip install "numpy<1.24"
@@ -66,113 +119,185 @@ pip install "omegaconf>=2.1" "hydra-core>=1.1"
 pip install "sentencepiece"
 ```
 
-If you see `np.float` / `np.int` errors, ensure `numpy<1.24`. If fairseq fails to load checkpoints, install `sentencepiece`.
+- `numpy<1.24` avoids `np.float` / `np.int` errors in fairseq.  
+- Newer omegaconf/hydra work with this fairseq.  
+- If you get “Unsupported global” or “sentencepiece” when loading the checkpoint, `sentencepiece` fixes it.
+
+**4e. Optional but recommended (PyTorch 2.6+):**  
+Edit `av_hubert/fairseq/fairseq/checkpoint_utils.py`, find:
+
+```python
+state = torch.load(f, map_location=torch.device("cpu"))
+```
+
+Change to:
+
+```python
+state = torch.load(f, map_location=torch.device("cpu"), weights_only=False)
+```
+
+This lets the AV-HuBERT checkpoint load. Then go back to the **AVH** repo root:
+
+```bash
+cd ../..   # back to AVH
+```
+
+---
 
 ### Step 5: Download face models and AV-HuBERT checkpoint
 
-Still inside `av_hubert/avhubert`:
+These files are not in the repo (too big). You need to download them once.
+
+**5a. Go into the avhubert folder again:**
+
+```bash
+cd av_hubert/avhubert
+```
+
+**5b. Create the misc folder and download the face landmark predictor (~95 MB):**
 
 ```bash
 mkdir -p content/data/misc/
-# Face landmark predictor (~95 MB)
 curl -L -o content/data/misc/shape_predictor_68_face_landmarks.dat.bz2 \
   http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
 bzip2 -d content/data/misc/shape_predictor_68_face_landmarks.dat.bz2
+```
 
-# Mean face for mouth cropping
+**5c. Download the mean face (used for mouth cropping):**
+
+```bash
 curl -L -o content/data/misc/20words_mean_face.npy \
   https://github.com/mpc001/Lipreading_using_Temporal_Convolutional_Networks/raw/master/preprocessing/20words_mean_face.npy
+```
 
-# AV-HuBERT Large checkpoint (~1 GB; required for feature extraction)
+**5d. Download the AV-HuBERT Large checkpoint (~1 GB). This can take a few minutes:**
+
+```bash
 curl -L -o self_large_vox_433h.pt \
   https://dl.fbaipublicfiles.com/avhubert/model/lrs3_vox/vsr/self_large_vox_433h.pt
 ```
 
 On Linux you can use `wget` instead of `curl` if you prefer.
 
-### Step 6: Copy scripts and fix fairseq checkpoint loading
-
-From the **AVH-Align** repo root (not inside `av_hubert`):
+**5e. Copy our scripts into avhubert (from AVH repo root):**
 
 ```bash
+cd ../..   # back to AVH repo root
 cp deepfake_preprocess.py av_hubert/avhubert/
 cp deepfake_feature_extraction.py av_hubert/avhubert/
 ```
 
-Optional but recommended for PyTorch ≥2.6: allow loading the AV-HuBERT checkpoint by editing fairseq:
+---
 
-- Open `av_hubert/fairseq/fairseq/checkpoint_utils.py`
-- Find the line: `state = torch.load(f, map_location=torch.device("cpu"))`
-- Change it to: `state = torch.load(f, map_location=torch.device("cpu"), weights_only=False)`
+### Step 6: Install ffmpeg
 
-### Step 7: Install ffmpeg
+Needed for extracting audio from videos and writing the cropped mouth video.
 
-Required for audio extraction and video writing.
-
-- **macOS:** `brew install ffmpeg`
-- **Ubuntu/Debian:** `sudo apt install ffmpeg`
+- **macOS:** `brew install ffmpeg`  
+- **Ubuntu/Debian:** `sudo apt install ffmpeg`  
 - **Windows:** download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH.
 
-### Step 8: Run detection on a single video
+Check:
 
-From the **AVH-Align** repo root, with `conda activate avh` (or your venv) active:
+```bash
+ffmpeg -version
+```
+
+---
+
+## How I Run the Test (Single Video)
+
+This is the main way I use the project: one command per video.
+
+**1. Open a terminal, go to the repo, activate the environment:**
+
+```bash
+cd /path/to/AVH
+conda activate avh
+```
+
+**2. Run the test script on any video file (must have a face and audio):**
 
 ```bash
 python test_video.py --video /path/to/your/video.mp4
 ```
 
-Example:
+Example with a file in the repo:
 
 ```bash
 python test_video.py --video test_videos/deepfake_obama.mp4
 ```
 
-Output:
+**3. What happens:**
 
-- **DEEPFAKE SCORE:** one number. **Higher = more likely fake**, lower = more likely real.
-- Typical range: real videos often negative to small positive; clear deepfakes can be +5 to +10.
+- **Stage 1 — Preprocess:** Detects the face, crops the mouth region, extracts audio. You’ll see “Loaded X frames” and paths to saved mouth ROI and audio.
+- **Stage 2 — Features:** Loads the AV-HuBERT checkpoint (first time can take ~30 s on CPU), then runs the model on the cropped video and audio. You’ll see “Extracting audio features” and “Extracting visual features”, then “Features extracted: audio=(X, 1024), visual=(X, 1024)”.
+- **Stage 3 — Detection:** Loads our small FusionModel and outputs one number.
 
-Options:
+**4. Output at the end looks like:**
 
-- `--keep_temp` — keep temporary preprocessed files (mouth crop, audio) for debugging.
-- `--use_mps` — use Apple MPS GPU on M1/M2/M3 (experimental).
-- `--avhubert_ckpt` / `--fusion_ckpt` — custom paths to AV-HuBERT and AVH-Align checkpoints.
+```
+=======================================================
+  DEEPFAKE SCORE: 6.0319
+  Higher score = more likely to be a deepfake
+=======================================================
+```
 
-**Note:** First run loads the large AV-HuBERT model (~30 s on CPU). A 1–2 minute video may take several minutes on CPU; GPU is much faster.
+**5. How I interpret it:**
+
+- **Negative or small positive (e.g. -2 to +1):** Looks more like a **real** video (mouth and speech in sync).
+- **Larger positive (e.g. +5 to +10):** More likely a **deepfake** (mouth and speech don’t match well).
+
+A 1–2 minute video on CPU can take several minutes; the slow part is Stage 2 (AV-HuBERT). GPU is much faster if you have it.
+
+**Optional flags I use sometimes:**
+
+- `--keep_temp` — Keep the temporary mouth crop and audio files (for debugging).
+- `--use_mps` — Use Apple MPS on M1/M2/M3 (experimental).
+- `--avhubert_ckpt path/to/self_large_vox_433h.pt` — If the checkpoint is not in `av_hubert/avhubert/`.
+- `--fusion_ckpt path/to/AVH-Align_AV1M.pt` — If you want to use a different FusionModel checkpoint.
 
 ---
 
-## What’s in this repo
+## Running Batch Evaluation (Pre-extracted features only)
 
-| Path | Description |
-|------|-------------|
-| `test_video.py` | One-command deepfake detection for a single video (preprocess + AV-HuBERT + FusionModel). |
-| `checkpoints/AVH-Align_AV1M.pt` | Pretrained AVH-Align weights (unsupervised, AV-Deepfake1M). |
-| `model.py` | FusionModel: small MLP that scores audio–visual sync. |
-| `eval.py` | Batch evaluation on pre-extracted `.npz` features (needs features from full pipeline below). |
-| `train.py` | Train AVH-Align (unsupervised) on extracted features. |
-| `config.py` | Training/config args. |
-| `dataset.py` | Dataset for training (iterates over `.npz` feature files). |
-| `av1m_metadata/` | Example metadata CSVs (path, label) for AV-Deepfake1M. |
-| `avh_sup/` | Supervised variant (PyTorch Lightning); see `avh_sup/README.md`. |
-
----
-
-## Full pipeline (preprocess → features → train/eval)
-
-For training or batch evaluation on datasets (e.g. AV-Deepfake1M), you need pre-extracted features.
-
-### Data
-
-- **AV-Deepfake1M (AV1M):** [AV-Deepfake1M](https://github.com/ControlNet/AV-Deepfake1M)
-- **FakeAVCeleb:** [FakeAVCeleb](https://github.com/DASH-Lab/FakeAVCeleb)
-- **AVLips:** [LipFD](https://github.com/AaronComo/LipFD)
-
-### Preprocess videos (mouth crop + audio)
-
-Run from `av_hubert/avhubert` (after Step 4–5):
+If you already have **extracted features** (`.npz` files from the full pipeline), you can run evaluation without preprocessing again:
 
 ```bash
+python eval.py \
+  --checkpoint_path checkpoints/AVH-Align_AV1M.pt \
+  --features_path /path/to/folder/containing/npz/files \
+  --metadata av1m_metadata/test_metadata.csv \
+  --dataset AV1M
+```
+
+The CSV must have columns `path` and `label`; `path` should match the `.npz` filenames (e.g. `path` like `id123/video.mp4` and files like `id123/video.npz`). This prints AUC and AP.
+
+---
+
+## Running Training (Optional)
+
+I didn’t train from scratch; I only use the provided checkpoint. If you want to train on your own extracted features:
+
+```bash
+python train.py --name=my_run \
+  --data_root_path=/path/to/features \
+  --metadata_root_path=/path/to/av1m_metadata
+```
+
+Training uses the metadata CSVs to find train/val splits and the feature `.npz` files. Checkpoints go to `checkpoints/` (see `config.py` for `--save_path`).
+
+---
+
+## Full Pipeline (Preprocess → Extract features → Train/Eval)
+
+For **training** or **batch eval**, you need to run the full pipeline once to get `.npz` features.
+
+**1. Preprocess videos (mouth crop + audio):**  
+Run from `av_hubert/avhubert` (after setup above):
+
+```bash
+cd av_hubert/avhubert
 python deepfake_preprocess.py \
   --dataset AV1M \
   --split train \
@@ -181,7 +306,7 @@ python deepfake_preprocess.py \
   --save_path /path/to/preprocessed
 ```
 
-### Extract AV-HuBERT features
+**2. Extract AV-HuBERT features:**
 
 ```bash
 python deepfake_feature_extraction.py \
@@ -193,54 +318,27 @@ python deepfake_feature_extraction.py \
   --save_path /path/to/features
 ```
 
-Use `--trimmed` for silence-trimmed features if needed.
+Add `--trimmed` if you want silence-trimmed features.
 
-### Train (unsupervised)
+**3. Train or run eval** as in the sections above, pointing to the same `--features_path` and metadata.
 
-From AVH-Align repo root:
-
-```bash
-python train.py --name=my_run \
-  --data_root_path=/path/to/features \
-  --metadata_root_path=/path/to/av1m_metadata
-```
-
-Checkpoints are saved under `checkpoints/` (see `config.py` for `--save_path`).
-
-### Batch evaluation (pre-extracted features only)
-
-```bash
-python eval.py \
-  --checkpoint_path checkpoints/AVH-Align_AV1M.pt \
-  --features_path /path/to/features \
-  --metadata av1m_metadata/test_metadata.csv \
-  --dataset AV1M
-```
-
-Reports AUC and AP. Requires that `.npz` feature files and metadata CSV match (see `eval.py` and `av1m_metadata/`).
+Datasets I referenced: [AV-Deepfake1M](https://github.com/ControlNet/AV-Deepfake1M), [FakeAVCeleb](https://github.com/DASH-Lab/FakeAVCeleb), [AVLips/LipFD](https://github.com/AaronComo/LipFD).
 
 ---
 
-## Creating a new repo and pushing (your own fork)
+## What’s in this repo (what I use)
 
-If you want this as your own GitHub repo:
-
-1. Create a **new repository** on GitHub (e.g. `YourUser/AVH-Align`). Do not add a README or .gitignore (we already have them).
-
-2. Add it as a remote and push (from `AVH-Align` on your machine):
-
-   ```bash
-   git remote add myorigin https://github.com/YourUser/AVH-Align.git
-   git add .gitignore README.md test_video.py
-   git add deepfake_preprocess.py deepfake_feature_extraction.py
-   git add model.py eval.py train.py config.py dataset.py utils.py
-   git add checkpoints/ av1m_metadata/ avh_sup/
-   git status   # ensure av_hubert/, venv/, test_videos/, *.mp4 are ignored
-   git commit -m "Add step-by-step README, test_video.py, and .gitignore"
-   git push -u myorigin main
-   ```
-
-3. Do **not** add the `av_hubert/` folder or `self_large_vox_433h.pt` (they are large and in `.gitignore`). Anyone who clones your repo will run Step 4–5 to get AV-HuBERT and the checkpoint.
+| Path | What I use it for |
+|------|-------------------|
+| `test_video.py` | Main script: run deepfake detection on a single video (preprocess + AV-HuBERT + FusionModel). |
+| `checkpoints/AVH-Align_AV1M.pt` | Pretrained detector weights; used by default by `test_video.py` and `eval.py`. |
+| `model.py` | FusionModel (small MLP that scores audio–visual sync). |
+| `eval.py` | Batch evaluation on pre-extracted `.npz` features. |
+| `train.py` | Training the detector on extracted features. |
+| `config.py` | Training/config arguments. |
+| `dataset.py` | Dataset that loads `.npz` features for training. |
+| `av1m_metadata/` | Example metadata CSVs (path, label) for AV-Deepfake1M. |
+| `avh_sup/` | Supervised variant (PyTorch Lightning); see `avh_sup/README.md` if you need it. |
 
 ---
 
@@ -257,6 +355,4 @@ If you want this as your own GitHub repo:
 
 ## License
 
-CC BY-NC-SA 4.0. See [license](https://creativecommons.org/licenses/by-nc-sa/4.0/).
-
-This repository uses code from [FACTOR](https://github.com/talreiss/FACTOR) and [AV-HuBERT](https://github.com/facebookresearch/av_hubert).
+CC BY-NC-SA 4.0. This repository uses code from [FACTOR](https://github.com/talreiss/FACTOR) and [AV-HuBERT](https://github.com/facebookresearch/av_hubert).
