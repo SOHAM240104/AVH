@@ -10,6 +10,7 @@ Outputs a deepfake score: higher = more likely fake.
 """
 
 import argparse
+import json
 import os
 import sys
 import subprocess
@@ -96,6 +97,7 @@ def preprocess_video(video_path, work_dir):
 
     preprocessed_landmarks = landmarks_interpolate(landmarks)
 
+    json_payload = None
     try:
         rois = crop_patch(
             video_path, preprocessed_landmarks, mean_face_landmarks,
@@ -242,6 +244,7 @@ def main():
     parser.add_argument("--avhubert_ckpt", type=str, default=AVHUBERT_CKPT, help="Path to AV-HuBERT checkpoint")
     parser.add_argument("--fusion_ckpt", type=str, default=FUSION_CKPT, help="Path to AVH-Align checkpoint")
     parser.add_argument("--keep_temp", action="store_true", help="Keep temporary preprocessed files")
+    parser.add_argument("--json_out", type=str, default=None, help="Optional path to write result JSON.")
     parser.add_argument("--use_mps", action="store_true", help="Use Apple MPS GPU (experimental)")
     args = parser.parse_args()
 
@@ -283,12 +286,33 @@ def main():
         # Stage 3: Deepfake detection
         score = run_detector(visual_feats, audio_feats, args.fusion_ckpt, torch.device("cpu"))
 
+        json_payload = {
+            "success": True,
+            "score": float(score),
+            "audio_path": audio_path if args.keep_temp else None,
+            "roi_path": roi_path if args.keep_temp else None,
+        }
+        if args.json_out:
+            os.makedirs(os.path.dirname(args.json_out) or ".", exist_ok=True)
+            with open(args.json_out, "w", encoding="utf-8") as f:
+                json.dump(json_payload, f)
+
         print()
         print("=" * 55)
         print(f"  DEEPFAKE SCORE: {score:.4f}")
         print(f"  Higher score = more likely to be a deepfake")
         print("=" * 55)
 
+    except Exception as e:
+        json_payload = {"success": False, "error": str(e)}
+        if args.json_out:
+            try:
+                os.makedirs(os.path.dirname(args.json_out) or ".", exist_ok=True)
+                with open(args.json_out, "w", encoding="utf-8") as f:
+                    json.dump(json_payload, f)
+            except Exception:
+                pass
+        raise
     finally:
         if not args.keep_temp:
             import shutil

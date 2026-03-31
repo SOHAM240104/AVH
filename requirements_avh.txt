@@ -1,0 +1,21 @@
+# AVH / test_video.py — install once in avh env:
+#   conda activate avh
+#   pip install -r AVH/requirements_avh.txt
+# Then: cd AVH/av_hubert/avhubert && git submodule update --init && cd ../fairseq && pip install -e . && cd ../avhubert
+
+torch
+torchvision
+torchaudio
+opencv-python
+dlib
+numpy<1.24
+librosa
+python_speech_features
+scikit-video
+scikit-image
+sentencepiece
+scikit-learn
+pandas
+tqdm
+omegaconf>=2.1,<2.3
+hydra-core>=1.1
