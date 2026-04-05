@@ -24,6 +24,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
 from typing import Optional, Any
 
@@ -31,6 +32,12 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Repo root (parent of AVH/) so we can import shared selection helpers when run as subprocess.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from explainability.gradcam_selection import select_top_cam_frames
 
 
 def ensure_dir(p: str):
@@ -81,6 +88,32 @@ def main():
     parser.add_argument("--adv_ckpt", type=str, default=None, help="Optional: adversary checkpoint (.pt) for robustness delta")
     parser.add_argument("--adv_epsilon", type=float, default=None, help="Optional: override adversary epsilon (perturbation strength)")
     parser.add_argument("--capture_attention", action="store_true", help="Best-effort: capture transformer attention weights (adds overhead).")
+    parser.add_argument(
+        "--smart_crop",
+        type=str,
+        default="auto",
+        choices=["off", "auto", "reel", "face"],
+        help="Spatial pre-crop before mouth ROI when preprocessing from --video_path.",
+    )
+    parser.add_argument(
+        "--selection_mode",
+        type=str,
+        default="top_k",
+        choices=["top_k", "diverse_topk", "temporal_peaks"],
+        help="How to pick overlay frames from per-frame CAM intensity (must match Streamlit / combined_runner).",
+    )
+    parser.add_argument(
+        "--min_temporal_gap",
+        type=int,
+        default=24,
+        help="Minimum frame gap for diverse_topk / temporal_peaks selection.",
+    )
+    parser.add_argument(
+        "--max_fusion_frames",
+        type=int,
+        default=200,
+        help="Window size hint for downstream video fusion (stored in index for XAI).",
+    )
     args = parser.parse_args()
 
     mod = load_test_video_module()
@@ -148,7 +181,7 @@ def main():
         work_dir = tempfile.mkdtemp(prefix="avh_gradcam_")
         created_work_dir = True
         print(f"[Grad-CAM] Working directory: {work_dir}")
-        roi_path, audio_path = mod.preprocess_video(args.video_path, work_dir)
+        roi_path, audio_path = mod.preprocess_video(args.video_path, work_dir, smart_crop=args.smart_crop)
     else:
         # Ensure the provided paths exist before proceeding.
         if not os.path.isfile(roi_path):
@@ -371,10 +404,13 @@ def main():
     frame_intensity = frame_intensity_full[:T_use]  # (T_use,)
     top_k = max(1, min(int(args.top_k), T_use))
 
-    order = np.argsort(frame_intensity)[::-1]
-    top_idx = [int(x) for x in order[:top_k].tolist()]
-    # Safety clamp: avoids edge cases where cam/ROI lengths diverge.
     cam_T = int(cam.shape[0])
+    top_idx = select_top_cam_frames(
+        frame_intensity,
+        top_k,
+        mode=str(args.selection_mode),
+        min_temporal_gap=int(args.min_temporal_gap),
+    )
     top_idx = [t for t in top_idx if 0 <= t < cam_T]
     if not top_idx:
         top_idx = [0]
@@ -435,6 +471,9 @@ def main():
         json = {
             "video_path": args.video_path,
             "roi_path": roi_path,
+            "max_fusion_frames": int(args.max_fusion_frames),
+            "selection_mode": str(args.selection_mode),
+            "min_temporal_gap": int(args.min_temporal_gap),
             "score": float(baseline_score.item()),
             "baseline_score": float(baseline_score.item()),
             "adv_score": adv_score,

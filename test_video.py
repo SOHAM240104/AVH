@@ -28,6 +28,7 @@ sys.path.insert(0, AVHUBERT_DIR)
 
 from python_speech_features import logfbank
 import librosa
+import soundfile as sf
 
 # AV-HuBERT uses sys.argv length to decide import style;
 # temporarily set it so absolute (non-package) imports are used.
@@ -74,16 +75,28 @@ def detect_landmark(image, detector, predictor):
     return coords
 
 
-def preprocess_video(video_path, work_dir):
-    """Crop mouth ROI and extract audio WAV. Returns (roi_path, audio_path)."""
+def preprocess_video(video_path, work_dir, smart_crop="auto"):
+    """Crop mouth ROI and extract audio WAV. Returns (roi_path, audio_path).
+
+    smart_crop: off | auto | reel | face — see AVH/smart_spatial_crop.py (reels / UI overlays).
+    """
     import skvideo.io
+
+    from smart_spatial_crop import maybe_smart_spatial_crop, normalize_smart_crop_mode
+
+    sc = normalize_smart_crop_mode(smart_crop)
+    src_path = video_path
+    if sc != "off":
+        src_path, crop_log = maybe_smart_spatial_crop(video_path, work_dir, mode=sc)
+        if crop_log:
+            print(f"  {crop_log}")
 
     print("[Stage 1] Preprocessing video: face detection + mouth crop ...")
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(FACE_PREDICTOR_PATH)
     mean_face_landmarks = np.load(MEAN_FACE_PATH)
 
-    videogen = skvideo.io.vread(video_path)
+    videogen = skvideo.io.vread(src_path)
     frames = np.array([frame for frame in videogen])
     print(f"  Loaded {len(frames)} frames")
 
@@ -100,7 +113,7 @@ def preprocess_video(video_path, work_dir):
     json_payload = None
     try:
         rois = crop_patch(
-            video_path, preprocessed_landmarks, mean_face_landmarks,
+            src_path, preprocessed_landmarks, mean_face_landmarks,
             STABLE_PNTS_IDS, STD_SIZE, window_margin=12,
             start_idx=48, stop_idx=68, crop_height=96, crop_width=96,
         )
@@ -119,8 +132,29 @@ def preprocess_video(video_path, work_dir):
 
     write_video_ffmpeg(rois, roi_path, ffmpeg_bin)
 
+    # Audio always from the original upload (spatial crop is visual-only).
     subprocess.run(
-        [ffmpeg_bin, "-i", video_path, "-f", "wav", "-vn", "-y", audio_path, "-loglevel", "quiet"],
+        [
+            ffmpeg_bin,
+            "-nostdin",
+            "-i",
+            video_path,
+            "-vn",
+            "-map",
+            "0:a:0?",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-sample_fmt",
+            "s16",
+            "-f",
+            "wav",
+            "-y",
+            audio_path,
+            "-loglevel",
+            "quiet",
+        ],
         check=True,
     )
     print(f"  Saved mouth ROI → {roi_path}")
@@ -148,7 +182,12 @@ def load_avhubert(ckpt_path, device):
 
 
 def compute_starting_silence(audio_path, threshold=0.0005, sr=16000):
-    audio, _ = librosa.load(audio_path, sr=sr)
+    audio, file_sr = sf.read(audio_path, always_2d=False)
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=-1)
+    if int(file_sr) != int(sr):
+        audio = librosa.resample(audio, orig_sr=int(file_sr), target_sr=sr, res_type="kaiser_best")
     for i, sample in enumerate(audio):
         if abs(sample) > threshold:
             return i / sr
@@ -156,8 +195,18 @@ def compute_starting_silence(audio_path, threshold=0.0005, sr=16000):
 
 
 def load_audio_features(path, silence_duration=0, sample_rate=16000, stack_order_audio=4):
-    wav_data, sr = librosa.load(path, sr=sample_rate)
-    assert sr == sample_rate and len(wav_data.shape) == 1
+    wav_data, file_sr = sf.read(path, always_2d=False)
+    wav_data = np.asarray(wav_data, dtype=np.float32)
+    if wav_data.ndim > 1:
+        wav_data = wav_data.mean(axis=-1)
+    if int(file_sr) != int(sample_rate):
+        wav_data = librosa.resample(
+            wav_data,
+            orig_sr=int(file_sr),
+            target_sr=int(sample_rate),
+            res_type="kaiser_best",
+        )
+    assert len(wav_data.shape) == 1
 
     skiped_frames = int(silence_duration * FPS) * 640
     if silence_duration > 0:
@@ -244,8 +293,20 @@ def main():
     parser.add_argument("--avhubert_ckpt", type=str, default=AVHUBERT_CKPT, help="Path to AV-HuBERT checkpoint")
     parser.add_argument("--fusion_ckpt", type=str, default=FUSION_CKPT, help="Path to AVH-Align checkpoint")
     parser.add_argument("--keep_temp", action="store_true", help="Keep temporary preprocessed files")
+    parser.add_argument(
+        "--dump_embeddings",
+        action="store_true",
+        help="Write avh_embeddings.npz (audio/visual feats for CMID) under work_dir; requires --keep_temp path to survive.",
+    )
     parser.add_argument("--json_out", type=str, default=None, help="Optional path to write result JSON.")
     parser.add_argument("--use_mps", action="store_true", help="Use Apple MPS GPU (experimental)")
+    parser.add_argument(
+        "--smart_crop",
+        type=str,
+        default="auto",
+        choices=["off", "auto", "reel", "face"],
+        help="Spatial pre-crop before mouth ROI: auto=reel/face heuristics, reel=vertical UI bands, face=face-centered.",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.video):
@@ -263,7 +324,7 @@ def main():
 
     try:
         # Stage 1: Preprocess
-        roi_path, audio_path = preprocess_video(args.video, work_dir)
+        roi_path, audio_path = preprocess_video(args.video, work_dir, smart_crop=args.smart_crop)
         print()
 
         # Stage 2: Extract features
@@ -278,6 +339,21 @@ def main():
             avh_model, roi_path, audio_path, transform, device
         )
 
+        embeddings_npz = None
+        if args.dump_embeddings:
+            if not args.keep_temp:
+                print("  Warning: --dump_embeddings requires --keep_temp; skipping embedding dump.")
+            else:
+                embeddings_npz = os.path.join(work_dir, "avh_embeddings.npz")
+                Ta, Tv = audio_feats.shape[0], visual_feats.shape[0]
+                Tm = min(Ta, Tv)
+                np.savez(
+                    embeddings_npz,
+                    audio=np.asarray(audio_feats[:Tm], dtype=np.float32),
+                    visual=np.asarray(visual_feats[:Tm], dtype=np.float32),
+                )
+                print(f"  Wrote embeddings for CMID: {embeddings_npz} (T={Tm})")
+
         del avh_model
         torch.mps.empty_cache() if device.type == "mps" else None
         import gc; gc.collect()
@@ -291,6 +367,7 @@ def main():
             "score": float(score),
             "audio_path": audio_path if args.keep_temp else None,
             "roi_path": roi_path if args.keep_temp else None,
+            "embeddings_npz": embeddings_npz if args.keep_temp and embeddings_npz else None,
         }
         if args.json_out:
             os.makedirs(os.path.dirname(args.json_out) or ".", exist_ok=True)

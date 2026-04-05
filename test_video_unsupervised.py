@@ -93,6 +93,13 @@ def main():
     p.add_argument("--keep_temp", action="store_true", help="Keep temp preprocessing files")
     p.add_argument("--json_out", type=str, default=None, help="Optional path to write result JSON.")
     p.add_argument("--use_mps", action="store_true", help="Use Apple MPS if available")
+    p.add_argument(
+        "--smart_crop",
+        type=str,
+        default="auto",
+        choices=["off", "auto", "reel", "face"],
+        help="Spatial pre-crop before mouth ROI (reels / UI overlays).",
+    )
     args = p.parse_args()
 
     if not os.path.isfile(args.video):
@@ -109,7 +116,7 @@ def main():
     print(f"Using device: {device}")
     json_payload = None
     try:
-        roi_path, audio_path = avh.preprocess_video(args.video, work_dir)
+        roi_path, audio_path = avh.preprocess_video(args.video, work_dir, smart_crop=args.smart_crop)
         model, task = avh.load_avhubert(args.avhubert_ckpt, device)
         transform = avh.avhubert_utils.Compose([
             avh.avhubert_utils.Normalize(0.0, 255.0),
